@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="form-container">
+    <h1>🔥 Top Issue</h1>
+    <form id="topIssueForm" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>数据文件:</label>
+            <input type="file" name="data_file" accept=".xlsx" required>
+        </div>
+        <div class="form-group">
+            <label>MTM文件:</label>
+            <input type="file" name="mtm_file" accept=".xlsx" required>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>开始日期:</label>
+                <input type="date" name="start_date" value="2024-04-09">
+            </div>
+            <div class="form-group">
+                <label>结束日期:</label>
+                <input type="date" name="end_date" value="2025-11-23">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>批次名称:</label>
+                <input type="text" name="batch_name" value="2024-2025">
+            </div>
+            <div class="form-group">
+                <label>Top N:</label>
+                <input type="number" name="top_n" value="10" min="5" max="50">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>输出目录（可选，留空使用默认）:</label>
+            <input type="text" name="output_dir" placeholder="例如：D:\QCR\输出">
+        </div>
+        <div class="form-group">
+            <label>PPT模板路径（可选）:</label>
+            <input type="text" name="ppt_template" placeholder="例如：D:\QCR\模板.pptx">
+        </div>
+        <div class="form-group">
+            <label><input type="checkbox" name="generate_ppt" value="true" checked> 生成PPT</label>
+            <label><input type="checkbox" name="filter_unmapped" value="true" checked> 过滤未映射</label>
+            <label><input type="checkbox" name="use_llm" value="true" checked> 启用AI分析</label>
+        </div>
+        <div class="advanced-options">
+            <button type="button" class="collapsible">⚙️ 高级选项</button>
+            <div class="content" style="display:none;">
+                <div class="form-group">
+                    <label>LLM超时(秒):</label>
+                    <input type="number" name="llm_timeout" value="60" min="30" max="300">
+                </div>
+            </div>
+        </div>
+        <button type="submit" class="btn btn-warning">开始分析</button>
+        <a href="/" class="btn btn-secondary">返回</a>
+    </form>
+    <div id="result" style="display:none;"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('topIssueForm').onsubmit = async function(e) {
+    e.preventDefault();
+    document.getElementById('result').innerHTML = '<p>分析中...</p>';
+    document.getElementById('result').style.display = 'block';
+    
+    const response = await fetch('/api/analyze/top_issue', {method: 'POST', body: new FormData(this)});
+    const data = await response.json();
+    
+    if (data.success) {
+        let html = '<h3>✅ 成功</h3><ul>';
+        html += `<li>总记录数: ${data.total_records}</li>`;
+        html += `<li>Top ${data.top_n} Issue 已分析</li>`;
+        html += `<li>输出目录: <code>${data.output_dir}</code></li>`;
+        html += '</ul>';
+        if (data.ppt_download_url) {
+            html += `<p><a href="${data.ppt_download_url}" class="btn btn-success">📥 下载PPT报告</a></p>`;
+        } else if (data.ppt_path) {
+            html += `<p class="text-warning">⚠️ 使用自定义输出目录，请通过"打开输出目录"查看PPT</p>`;
+        }
+        html += `<p><button onclick="window.open('file:///${data.output_dir.replace(/\\\\/g, '/')}')" class="btn btn-info">📂 打开输出目录</button></p>`;
+        document.getElementById('result').innerHTML = html;
+    } else {
+        document.getElementById('result').innerHTML = `<h3>❌ 失败</h3><p>${data.error}</p>`;
+    }
+};
+
+// 高级选项折叠
+document.querySelectorAll('.collapsible').forEach(btn => {
+    btn.addEventListener('click', function() {
+        this.classList.toggle('active');
+        const content = this.nextElementSibling;
+        content.style.display = content.style.display === 'block' ? 'none' : 'block';
+    });
+});
+</script>
+{% endblock %}
+

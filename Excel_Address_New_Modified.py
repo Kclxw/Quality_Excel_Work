@@ -24,6 +24,8 @@ import sys
 import os
 import re
 from datetime import datetime
+import pymysql
+from sqlalchemy import create_engine
 
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
@@ -36,6 +38,17 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 # 处理字体警告 - 使用更兼容的字体设置
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Glyph.*missing.*")
+
+# -----------------------------
+# 数据库配置
+# -----------------------------
+DB_CONFIG = {
+    'host': 'localhost',
+    'port': 3306,
+    'user': 'root',
+    'password': '0929',
+    'database': 'local_qcr'
+}
 
 # -----------------------------
 # 工具函数：清理文件名中的非法字符
@@ -52,6 +65,181 @@ def sanitize_filename(filename):
     if len(filename) > 200:
         filename = filename[:200]
     return filename
+
+# -----------------------------
+# 数据库工具函数
+# -----------------------------
+def check_and_import_new_data(df):
+    """检查数据库中不存在的服务单号并导入新数据"""
+    try:
+        print("开始连接数据库...")
+        # 创建数据库连接
+        connection_string = (
+            f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
+            f"{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}"
+        )
+        engine = create_engine(connection_string)
+        
+        # 检查数据框中是否有服务单号列
+        service_order_column = None
+        for col in df.columns:
+            if '服务单号' in str(col):
+                service_order_column = col
+                break
+        
+        if service_order_column is None:
+            print("警告：未找到'服务单号'列，跳过数据库检查")
+            return df
+        
+        # 获取当前数据中的服务单号
+        current_service_orders = df[service_order_column].dropna().astype(str).tolist()
+        print(f"当前数据包含 {len(current_service_orders)} 个服务单号")
+        
+        # 查询数据库中已存在的服务单号
+        try:
+            # 先检查表是否存在
+            table_exists = pd.read_sql(
+                "SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = %s AND table_name = 'qcr_data'", 
+                engine, 
+                params=(DB_CONFIG['database'],)
+            )['count'].iloc[0] > 0
+            
+            if table_exists:
+                existing_service_orders = pd.read_sql(
+                    "SELECT service_order_id FROM qcr_data", 
+                    engine
+                )['service_order_id'].astype(str).tolist()
+                print(f"数据库中已存在 {len(existing_service_orders)} 个服务单号")
+            else:
+                print("数据库表qcr_data不存在，将创建新表")
+                existing_service_orders = []
+        except Exception as e:
+            print(f"查询数据库失败，假设数据库为空: {e}")
+            existing_service_orders = []
+        
+        # 筛选出数据库中不存在的新服务单号
+        new_service_orders = [
+            order for order in current_service_orders 
+            if order not in existing_service_orders
+        ]
+        print(f"新服务单号数量: {len(new_service_orders)}")
+        
+        # 筛选新数据
+        df_new = df[df[service_order_column].astype(str).isin(new_service_orders)].copy()
+        
+        if len(df_new) == 0:
+            print("没有新数据需要导入和分析")
+            return df_new
+        
+        # 准备导入数据库的数据
+        df_to_import = df_new.copy()
+        
+        # 重命名列以匹配数据库字段
+        column_mapping = {}
+        for col in df_to_import.columns:
+            if '服务单号' in str(col):
+                column_mapping[col] = 'service_order_id'
+            elif '日期' in str(col):
+                column_mapping[col] = 'date'
+            elif '订单号' in str(col):
+                column_mapping[col] = 'order_id'
+            elif '问题描述' in str(col):
+                column_mapping[col] = 'issue_description'
+            elif 'SKU' in str(col):
+                column_mapping[col] = 'sku'
+            elif 'SN编码' in str(col):
+                column_mapping[col] = 'sn_code'
+            elif '客户账号' in str(col) or '客户账户' in str(col):
+                column_mapping[col] = 'customer_account'
+            elif '商品名称' in str(col):
+                column_mapping[col] = 'product_name'
+            elif 'MTM' in str(col):
+                column_mapping[col] = 'mtm'
+            elif '审核原因' in str(col):
+                column_mapping[col] = 'audit_reason'
+            elif '问题分类' in str(col) and '一' not in str(col):
+                column_mapping[col] = 'issue_category'
+            elif '分类' in str(col) and '问题' not in str(col):
+                column_mapping[col] = 'category'
+        
+        # 应用列映射
+        df_to_import = df_to_import.rename(columns=column_mapping)
+        
+        # 确保必需的列存在
+        required_db_columns = [
+            'service_order_id', 'date', 'order_id', 'issue_description', 
+            'sku', 'sn_code', 'customer_account', 'product_name', 
+            'mtm', 'audit_reason', 'issue_category', 'category'
+        ]
+        
+        for col in required_db_columns:
+            if col not in df_to_import.columns:
+                df_to_import[col] = ''
+        
+        # 数据类型转换和清洗
+        # 处理日期
+        if 'date' in df_to_import.columns:
+            df_to_import['date'] = pd.to_datetime(df_to_import['date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            df_to_import['date'] = df_to_import['date'].fillna('1900-01-01')
+        
+        # 处理数值列
+        numeric_columns = ['service_order_id', 'order_id', 'sku']
+        for col in numeric_columns:
+            if col in df_to_import.columns:
+                df_to_import[col] = pd.to_numeric(df_to_import[col], errors='coerce').astype('Int64')
+        
+        # 处理字符串列
+        string_columns = [
+            'issue_description', 'sn_code', 'customer_account', 
+            'product_name', 'mtm', 'audit_reason', 
+            'issue_category', 'category'
+        ]
+        for col in string_columns:
+            if col in df_to_import.columns:
+                df_to_import[col] = df_to_import[col].fillna('').astype(str).str.strip()
+                # 字符串长度限制
+                max_lengths = {
+                    'issue_description': 500,
+                    'sn_code': 100,
+                    'customer_account': 100,
+                    'product_name': 200,
+                    'mtm': 50,
+                    'audit_reason': 100,
+                    'issue_category': 100,
+                    'category': 100
+                }
+                if col in max_lengths:
+                    df_to_import[col] = df_to_import[col].str[:max_lengths[col]]
+        
+        # 删除必需字段为空的行
+        if 'service_order_id' in df_to_import.columns:
+            df_to_import = df_to_import.dropna(subset=['service_order_id'])
+        
+        # 只选择数据库需要的列
+        df_to_import = df_to_import[required_db_columns]
+        
+        # 导入数据到数据库
+        if len(df_to_import) > 0:
+            try:
+                df_to_import.to_sql(
+                    'qcr_data', 
+                    engine, 
+                    if_exists='append', 
+                    index=False,
+                    method='multi'
+                )
+                print(f"成功导入 {len(df_to_import)} 条新记录到数据库")
+            except Exception as e:
+                print(f"导入数据到数据库失败: {e}")
+                print("将继续分析当前数据，但新数据不会保存到数据库")
+        
+        # 返回新数据用于后续分析
+        return df_new
+        
+    except Exception as e:
+        print(f"数据库操作失败: {e}")
+        print("将继续分析原始数据，跳过数据库检查和导入")
+        return df
 
 # -----------------------------
 # 1. 命令行参数处理
@@ -89,19 +277,33 @@ else:
 out_dir.mkdir(exist_ok=True)
 sheet_name = 0  # 默认第一张表
 
+# -----------------------------
+# 日期解析函数
+# -----------------------------
+def parse_date(date_str):
+    """尝试解析多种日期格式"""
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"无法解析日期: {date_str}，请使用 YYYY-MM-DD 或 YYYY/MM/DD 格式")
+
+# -----------------------------
 # 获取日期范围参数
+# -----------------------------
 start_date = None
 end_date = None
 if len(sys.argv) >= 5:
     try:
-        start_date = datetime.strptime(sys.argv[4], "%Y-%m-%d").date()
-    except ValueError:
-        print(f"警告: 开始日期格式错误，将处理所有数据")
+        start_date = parse_date(sys.argv[4])
+    except ValueError as e:
+        print(f"警告: {e}，将处理所有数据")
 if len(sys.argv) >= 6:
     try:
-        end_date = datetime.strptime(sys.argv[5], "%Y-%m-%d").date()
-    except ValueError:
-        print(f"警告: 结束日期格式错误，将处理所有数据")
+        end_date = parse_date(sys.argv[5])
+    except ValueError as e:
+        print(f"警告: {e}，将处理所有数据")
 
 # -----------------------------
 # 2. 读取数据
@@ -125,6 +327,13 @@ elif end_date:
     mask = df[date_column] <= end_date
     df = df[mask]
     print(f"已筛选 {end_date} 之前的数据，共 {len(df)} 条记录")
+
+# -----------------------------
+# 数据库检查和导入新数据
+# -----------------------------
+print("\n开始检查数据库中已存在的服务单号...")
+df = check_and_import_new_data(df)
+print(f"数据库检查后，剩余 {len(df)} 条新记录需要分析\n")
 
 # -----------------------------
 # 3. 去重MTM
@@ -290,6 +499,140 @@ def build_model_issue_table(df_sub, suffix, detailed_dir):
         plt.close()
         
         print(f"已生成 {model} 的 {suffix} 数据，共 {len(sub)} 个分类，{len(model_data)} 条记录")
+
+
+# -----------------------------
+# 修复 generate_analysis_report 函数中的列名问题
+# -----------------------------
+def generate_analysis_report(df, df_7d, df_non_7d, out_dir, start_date, end_date):
+    """生成分析报告并保存到文本文件"""
+    report_lines = []
+
+    # 1. 落入D等级产品数据统计
+    d_grade_data = df[df['审核原因'] == 'D等级']
+    d_grade_count = len(d_grade_data)
+    d_grade_models = d_grade_data['机型名称'].unique()
+    d_grade_model_count = len(d_grade_models)
+    report_lines.append(f"落入D等级产品数据：{d_grade_count} 条")
+    report_lines.append(f"覆盖周期：{start_date} 至 {end_date}")
+    report_lines.append(f"涉及机型：{', '.join(d_grade_models)}")
+    report_lines.append(f"共计机型数量：{d_grade_model_count} 款\n")
+
+    # 2. 审核原因占比
+    reasons = ["7天无理由", "15天质量换新", "质量维修", "180天只换不修"]
+    total_count = len(df)
+    for reason in reasons:
+        count = (df['审核原因'] == reason).sum()
+        percentage = (count / total_count * 100) if total_count > 0 else 0
+        report_lines.append(f"审核原因 - {reason}：{count} 条，占比 {percentage:.2f}%")
+    report_lines.append("")
+
+    # 3. 七天无理由机型占比
+    if len(df_7d) > 0:
+        model_7d_dist = (
+            df_7d['机型名称']
+            .value_counts()
+            .rename_axis('机型名称')
+            .reset_index(name='数量')
+            .assign(占比=lambda x: (x['数量'] / x['数量'].sum() * 100).round(2))
+        )
+        report_lines.append("七天无理由机型占比：")
+        for _, row in model_7d_dist.iterrows():
+            report_lines.append(f"  {row['机型名称']}: {row['数量']} 条，占比 {row['占比']}%")
+        report_lines.append("")
+
+    # 4. 非七天无理由机型占比
+    if len(df_non_7d) > 0:
+        model_non_7d_dist = (
+            df_non_7d['机型名称']
+            .value_counts()
+            .rename_axis('机型名称')
+            .reset_index(name='数量')
+            .assign(占比=lambda x: (x['数量'] / x['数量'].sum() * 100).round(2))
+        )
+        report_lines.append("非七天无理由机型占比：")
+        for _, row in model_non_7d_dist.iterrows():
+            report_lines.append(f"  {row['机型名称']}: {row['数量']} 条，占比 {row['占比']}%")
+        report_lines.append("")
+
+    # 5. 每个机型七天无理由的分类数据分析
+    report_lines.append("每个机型七天无理由的分类数据分析：")
+    for model in df_7d['机型名称'].unique():
+        model_data = df_7d[df_7d['机型名称'] == model]
+        total_comments = len(model_data)
+        no_reason_count = (model_data['分类'] == '无理由退货').sum()
+        no_reason_percentage = (no_reason_count / total_comments * 100) if total_comments > 0 else 0
+        top_issues = (
+            model_data['分类']
+            .value_counts()
+            .reset_index(name='次数')
+            .rename(columns={'index': '分类'})  # 确保列名正确
+        )
+
+        # 调试信息：打印 top_issues 列名和数据
+        print("七天无理由 - Top Issues:")
+        print(top_issues.head())
+
+        top_issues = top_issues[top_issues['次数'] >= 2].head(2)
+        report_lines.append(f"  {model}:")
+        report_lines.append(f"    评论总数：{total_comments}")
+        report_lines.append(f"    无理由退货：{no_reason_count} 条，占比 {no_reason_percentage:.2f}%")
+        for _, row in top_issues.iterrows():
+            issue_percentage = (row['次数'] / total_comments * 100) if total_comments > 0 else 0
+            report_lines.append(f"    Top问题：{row['分类']}，次数：{row['次数']}，占比：{issue_percentage:.2f}%")
+    report_lines.append("")
+
+    # 6. 每个机型非七天无理由的分类数据分析
+    report_lines.append("每个机型非七天无理由的分类数据分析：")
+    for model in df_non_7d['机型名称'].unique():
+        model_data = df_non_7d[df_non_7d['机型名称'] == model]
+        total_comments = len(model_data)
+        top_issues = (
+            model_data['分类']
+            .value_counts()
+            .reset_index(name='次数')
+            .rename(columns={'index': '分类'})  # 确保列名正确
+        )
+
+        # 调试信息：打印 top_issues 列名和数据
+        print("非七天无理由 - Top Issues:")
+        print(top_issues.head())
+
+        top_issues = top_issues[top_issues['次数'] >= 2].head(2)
+        report_lines.append(f"  {model}:")
+        report_lines.append(f"    有效评论总数：{total_comments}")
+        for _, row in top_issues.iterrows():
+            issue_percentage = (row['次数'] / total_comments * 100) if total_comments > 0 else 0
+            report_lines.append(f"    Top问题：{row['分类']}，次数：{row['次数']}，占比：{issue_percentage:.2f}%")
+    report_lines.append("")
+
+    # 7. 总结
+    report_lines.append("总结：")
+    report_lines.append(f"本次报告时间覆盖：{start_date} 至 {end_date}")
+    report_lines.append(f"覆盖机型：{', '.join(df['机型名称'].unique())}")
+    report_lines.append("非七天无理由分类中，以下机型的问题较为突出：")
+    for model in df_non_7d['机型名称'].unique():
+        model_data = df_non_7d[df_non_7d['机型名称'] == model]
+        top_issues = (
+            model_data['分类']
+            .value_counts()
+            .reset_index(name='次数')
+            .rename(columns={'index': '分类'})  # 确保列名正确
+        )
+        top_issues = top_issues[top_issues['次数'] >= 2].head(2)
+        for _, row in top_issues.iterrows():
+            report_lines.append(f"  {model} - {row['分类']}：{row['次数']} 次")
+
+    # 保存报告到文件
+    report_path = out_dir / "分析报告.txt"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines))
+
+    print(f"分析报告已生成：{report_path}")
+
+# 在主流程中调用生成分析报告的函数
+generate_analysis_report(df, df_7d, df_non_7d, out_dir, start_date, end_date)
+
 
 # 生成7天无理由数据
 build_model_issue_table(df_7d, "7天无理由", detailed_dir_7d)

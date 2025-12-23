@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="hero">
+    <h1>QCR 数据分析系统 v4.0</h1>
+    <p class="subtitle">基于Agent架构的QCR数据分析平台</p>
+</div>
+<div class="mode-cards">
+    <div class="mode-card">
+        <h3>📊 Weekly Report</h3>
+        <p>每周QCR分析</p>
+        <a href="{{ url_for('weekly_form') }}" class="btn btn-primary">开始分析</a>
+    </div>
+    <div class="mode-card">
+        <h3>🔥 Top Issue</h3>
+        <p>Top Issue统计分析</p>
+        <a href="{{ url_for('top_issue_form') }}" class="btn btn-warning">开始分析</a>
+    </div>
+    <div class="mode-card">
+        <h3>🏆 Top Model</h3>
+        <p>Top机器深度分析（基于问题类别数）</p>
+        <a href="{{ url_for('top_model_form') }}" class="btn btn-success">开始分析</a>
+    </div>
+</div>
+{% endblock %}
+

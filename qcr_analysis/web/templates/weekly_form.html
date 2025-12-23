@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="form-container">
+    <h1>📊 Weekly Report</h1>
+    <form id="weeklyForm" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>数据文件:</label>
+            <input type="file" name="data_file" accept=".xlsx" required>
+        </div>
+        <div class="form-group">
+            <label>MTM文件:</label>
+            <input type="file" name="mtm_file" accept=".xlsx" required>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>开始日期:</label>
+                <input type="date" name="start_date" value="2024-04-09">
+            </div>
+            <div class="form-group">
+                <label>结束日期:</label>
+                <input type="date" name="end_date" value="2025-11-23">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>批次名称:</label>
+            <input type="text" name="batch_name" value="2024-2025">
+        </div>
+        <div class="form-group">
+            <label>输出目录（可选，留空使用默认）:</label>
+            <input type="text" name="output_dir" placeholder="例如：D:\QCR\输出">
+        </div>
+        <div class="form-group">
+            <label>PPT模板路径（可选）:</label>
+            <input type="text" name="ppt_template" placeholder="例如：D:\QCR\模板.pptx">
+        </div>
+        <div class="form-group">
+            <label><input type="checkbox" name="generate_ppt" value="true" checked> 生成PPT</label>
+            <label><input type="checkbox" name="use_llm" value="true"> 启用AI分析</label>
+            <label><input type="checkbox" name="filter_unmapped" value="true" checked> 过滤未映射</label>
+        </div>
+        <details>
+            <summary>高级选项（LLM配置）</summary>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>LLM超时(秒):</label>
+                    <input type="number" name="llm_timeout" value="60">
+                </div>
+                <div class="form-group">
+                    <label>LLM Top N:</label>
+                    <input type="number" name="llm_top_n" value="3">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>覆盖度阈值(%):</label>
+                    <input type="number" name="llm_coverage" value="80" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label>重点拦截阈值(%):</label>
+                    <input type="number" name="llm_focus" value="10" step="0.1">
+                </div>
+            </div>
+        </details>
+        <button type="submit" class="btn btn-primary">开始分析</button>
+        <a href="/" class="btn btn-secondary">返回</a>
+    </form>
+    <div id="result" style="display:none;"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('weeklyForm').onsubmit = async function(e) {
+    e.preventDefault();
+    document.getElementById('result').innerHTML = '<p>分析中...</p>';
+    document.getElementById('result').style.display = 'block';
+    
+    const formData = new FormData(this);
+    const response = await fetch('/api/analyze/weekly', {method: 'POST', body: formData});
+    const data = await response.json();
+    
+    if (data.success) {
+        let html = '<h3>✅ 成功</h3><ul>';
+        html += `<li>总记录数: ${data.total_records}</li>`;
+        html += `<li>7天无理由: ${data.records_7d} 条</li>`;
+        html += `<li>非7天无理由: ${data.records_non_7d} 条</li>`;
+        html += `<li>输出目录: <code>${data.output_dir}</code></li>`;
+        html += '</ul>';
+        if (data.ppt_download_url) {
+            html += `<p><a href="${data.ppt_download_url}" class="btn btn-success">📥 下载PPT报告</a></p>`;
+        } else if (data.ppt_path) {
+            html += `<p class="text-warning">⚠️ 使用自定义输出目录，请通过"打开输出目录"查看PPT</p>`;
+        }
+        html += `<p><button onclick="window.open('file:///${data.output_dir.replace(/\\\\/g, '/')}')" class="btn btn-info">📂 打开输出目录</button></p>`;
+        document.getElementById('result').innerHTML = html;
+    } else {
+        document.getElementById('result').innerHTML = `<h3>❌ 失败</h3><p>${data.error}</p>`;
+    }
+};
+</script>
+{% endblock %}
+
